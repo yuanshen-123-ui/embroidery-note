@@ -1,0 +1,14 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: 'LXGW WenKai', 'Kaiti SC', 'STKaiti', 'KaiTi', serif;
+  -webkit-font-smoothing: antialiased;
+}
