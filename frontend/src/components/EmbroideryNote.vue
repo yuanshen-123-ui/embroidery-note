@@ -1,5 +1,5 @@
 <script setup>
-import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import HanziWriter from 'hanzi-writer'
 import Icon from './Icon.vue'
 
@@ -21,15 +21,30 @@ const LOCAL_NOTES = [
 
 /* ---------------- 状态 ---------------- */
 const input = ref('')
-const stitched = ref([])        // { id, ch, color, type: 'cjk'|'plain'|'nl' }
+const stitched = ref([])        // { id, ch, color, type: 'cjk'|'plain'|'nl', rot, dy }
 const notes = ref(LOCAL_NOTES)
 const apiOk = ref(false)        // 后端可达时才显示"生成图片"
 const status = ref('')
 const threadColor = ref(PALETTE[0])
 const needleVisible = ref(false)
 
+/* 工具栏状态 */
+const threadMode = ref('auto')  // 'auto' 或具体颜色
+const pickerOpen = ref(false)
+const fontIdx = ref(0)
+const FONTS = [
+  { name: '文楷', css: "'LXGW WenKai','Kaiti SC','STKaiti','KaiTi',serif" },
+  { name: '行楷', css: "'STXingkai','Xingkai SC','KaiTi','LXGW WenKai',serif" },
+  { name: '幼圆', css: "'YouYuan','Yuanti SC','LXGW WenKai','KaiTi',serif" },
+]
+const handFont = computed(() => FONTS[fontIdx.value].css)
+const customColor = ref('#3f5f9e')
+
 const cardEl = ref(null)
 const needleEl = ref(null)
+const threadPathEl = ref(null)
+const ballEl = ref(null)
+const ballCenter = { x: 0, y: 0 }
 
 let prevLen = 0
 let uid = 0
@@ -77,6 +92,17 @@ function setNeedle(x, y) {
   needlePos.y = y
   if (needleEl.value) {
     needleEl.value.style.transform = `translate(${x.toFixed(1)}px, ${y.toFixed(1)}px)`
+  }
+  /* 针鼻拖着长线连到右下角的线球（贝塞尔自然下垂） */
+  if (threadPathEl.value) {
+    const ex = x - 30
+    const ey = y - 60
+    const bx = ballCenter.x
+    const by = ballCenter.y
+    threadPathEl.value.setAttribute(
+      'd',
+      `M ${ex.toFixed(1)} ${ey.toFixed(1)} C ${(ex - 12).toFixed(1)} ${(ey + 60).toFixed(1)}, ${(bx - 40).toFixed(1)} ${(by - 55).toFixed(1)}, ${bx.toFixed(1)} ${by.toFixed(1)}`,
+    )
   }
 }
 
@@ -146,6 +172,14 @@ async function playItem(item, gen) {
   const host = cellEls.get(item.id)
   const card = cardEl.value
   if (!host || !card || gen !== playGen) return
+
+  /* 线球锚点（相对卡片坐标，每次开播刷新一次） */
+  if (ballEl.value) {
+    const br = ballEl.value.getBoundingClientRect()
+    const cr = card.getBoundingClientRect()
+    ballCenter.x = br.left - cr.left + 12
+    ballCenter.y = br.top - cr.top + 14
+  }
 
   /* 格子原点：用 offset 链取"未旋转"的布局位置（transform 不影响 offsetLeft/Top） */
   let ox = 0
@@ -265,7 +299,10 @@ function enqueueText(str) {
       : {
           id: ++uid,
           ch,
-          color: PALETTE[colorIdx++ % PALETTE.length],
+          color:
+            threadMode.value !== 'auto'
+              ? threadMode.value
+              : PALETTE[colorIdx++ % PALETTE.length],
           type: IS_CJK(ch) ? 'cjk' : 'plain',
           // 手写歪斜：每字独立随机，重播/刷新时重新生成
           rot: (3 + Math.random() * 5) * (Math.random() < 0.5 ? -1 : 1), // ±3–8°
@@ -332,8 +369,41 @@ async function copyText() {
   }
 }
 
-async function generateImage() {
+/* ---------------- 工具栏：绣线 / 字体 / 图案 / 粘贴 / 剪刀 ---------------- */
+function togglePicker() {
+  pickerOpen.value = !pickerOpen.value
+}
+function pickColor(c) {
+  threadMode.value = c
+  threadColor.value = c // 拖线立即换色
+  status.value = '已换绣线'
+}
+function cycleFont() {
+  fontIdx.value = (fontIdx.value + 1) % FONTS.length
+  status.value = `字体：${FONTS[fontIdx.value].name}`
+}
+function insertPattern() {
+  const syms = ['♡', '✿', '★', '☆', '❀', '♥']
+  enqueueText(syms[Math.floor(Math.random() * syms.length)])
+}
+async function pasteText() {
   try {
+    const t = await navigator.clipboard.readText()
+    if (!t) throw new Error('empty')
+    enqueueText(t.slice(0, MAX_CHARS))
+    status.value = '已粘贴，开绣'
+  } catch {
+    status.value = '读取剪贴板失败，请 Ctrl+V 到输入框'
+  }
+}
+function cutLast() {
+  const last = stitched.value[stitched.value.length - 1]
+  if (!last) return
+  stitched.value.pop()
+  status.value = `剪掉了「${last.ch}」`
+}
+
+async function generateImage() {  try {
     const res = await fetch('/api/render?download=1', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -423,7 +493,7 @@ function petals(f) {
 <template>
   <div class="page">
     <!-- 便签卡片 = 绣布 -->
-    <div ref="cardEl" class="card">
+    <div ref="cardEl" class="card" :style="{ '--hand-font': handFont }">
       <svg class="border-svg" viewBox="0 0 720 734" preserveAspectRatio="none" aria-hidden="true">
         <path :d="borderPath" fill="none" :stroke="BLUE" stroke-width="3.4" />
         <rect
@@ -500,6 +570,28 @@ function petals(f) {
         </template>
       </div>
 
+      <!-- 针鼻拖线（连到右下角线球） -->
+      <svg class="thread-layer" v-show="needleVisible" aria-hidden="true">
+        <path
+          ref="threadPathEl" d="" fill="none" :stroke="threadColor"
+          stroke-width="2.2" stroke-linecap="round" opacity="0.85"
+        />
+      </svg>
+
+      <!-- 彩色线球 -->
+      <div ref="ballEl" class="yarn" aria-hidden="true">
+        <svg viewBox="0 0 48 48" width="46" height="46">
+          <defs><clipPath id="yarnclip"><circle cx="24" cy="24" r="20" /></clipPath></defs>
+          <circle cx="24" cy="24" r="20" fill="#8a6fc0" />
+          <g clip-path="url(#yarnclip)" fill="none" stroke-width="5" stroke-linecap="round">
+            <path d="M0 13 Q24 21 48 11" stroke="#5b8fd6" />
+            <path d="M0 25 Q24 33 48 23" stroke="#5aa86e" />
+            <path d="M0 37 Q24 43 48 35" stroke="#d16a8a" />
+          </g>
+          <ellipse cx="16" cy="15" rx="5.5" ry="3" fill="rgba(255,255,255,.35)" transform="rotate(-24 16 15)" />
+        </svg>
+      </div>
+
       <!-- SVG 刺绣针：针尖在 (0,0)，跟随当前笔画 -->
       <div v-show="needleVisible" ref="needleEl" class="needle">
         <svg width="96" height="96" viewBox="-90 -86 96 96" class="needle-svg">
@@ -524,6 +616,49 @@ function petals(f) {
         <Icon name="needle" :size="16" />
         输入要绣的字（每打一个字，针就绣一个）
       </label>
+      <!-- 工具瓦片栏 -->
+      <div class="toolbar">
+        <button class="tile" :class="{ on: pickerOpen }" @click="togglePicker">
+          <span class="tile-icon t1"><Icon name="spool" :size="20" /></span><span class="tile-label">绣线</span>
+        </button>
+        <button class="tile" @click="cycleFont">
+          <span class="tile-icon t2"><Icon name="font" :size="20" /></span><span class="tile-label">{{ FONTS[fontIdx].name }}</span>
+        </button>
+        <button class="tile" @click="insertPattern">
+          <span class="tile-icon t3"><Icon name="flower" :size="20" /></span><span class="tile-label">图案</span>
+        </button>
+        <button class="tile" @click="pasteText">
+          <span class="tile-icon t4"><Icon name="paste" :size="20" /></span><span class="tile-label">粘贴</span>
+        </button>
+        <button class="tile" @click="cutLast">
+          <span class="tile-icon t5"><Icon name="scissors" :size="20" /></span><span class="tile-label">剪刀</span>
+        </button>
+        <button class="tile" @click="randomNote">
+          <span class="tile-icon t6"><Icon name="dice" :size="20" /></span><span class="tile-label">随机</span>
+        </button>
+        <button class="tile" @click="replay">
+          <span class="tile-icon t7"><Icon name="replay" :size="20" /></span><span class="tile-label">重播</span>
+        </button>
+        <button class="tile" @click="generateImage">
+          <span class="tile-icon t8"><Icon name="download" :size="20" /></span><span class="tile-label">保存</span>
+        </button>
+        <button class="tile" @click="clearAll">
+          <span class="tile-icon t9"><Icon name="trash" :size="20" /></span><span class="tile-label">清空</span>
+        </button>
+      </div>
+
+      <!-- 绣线色盘 -->
+      <div v-if="pickerOpen" class="swatches">
+        <button class="swatch auto" :class="{ on: threadMode === 'auto' }" @click="threadMode = 'auto'">随机</button>
+        <button
+          v-for="c in PALETTE" :key="c" class="swatch"
+          :class="{ on: threadMode === c }" :style="{ background: c }" @click="pickColor(c)"
+        ></button>
+        <label class="swatch custom" title="自定义线色">
+          <input type="color" v-model="customColor" @input="pickColor(customColor)" />
+        </label>
+      </div>
+
       <input
         id="type-input"
         v-model="input"
@@ -534,13 +669,6 @@ function petals(f) {
         @compositionend="composing = false; onInput()"
         @input="onInput"
       />
-      <div class="btns">
-        <button class="btn" @click="randomNote"><Icon name="dice" /> 随机文案</button>
-        <button class="btn" @click="replay"><Icon name="replay" /> 重播</button>
-        <button class="btn" @click="copyText"><Icon name="copy" /> 复制</button>
-        <button v-if="apiOk" class="btn primary" @click="generateImage"><Icon name="download" /> 生成图片</button>
-        <button class="btn" @click="clearAll"><Icon name="trash" /> 清空</button>
-      </div>
       <p class="status">{{ status }}</p>
     </div>
   </div>
@@ -639,7 +767,7 @@ function petals(f) {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-family: 'LXGW WenKai', 'Kaiti SC', 'STKaiti', 'KaiTi', serif;
+  font-family: var(--hand-font, 'LXGW WenKai', 'Kaiti SC', 'STKaiti', 'KaiTi', serif);
   font-size: 52px;
   color: rgba(63, 95, 158, 0.16);
   user-select: none;
@@ -668,7 +796,7 @@ function petals(f) {
 .plain-ch {
   height: 76px;
   line-height: 84px;
-  font-family: 'LXGW WenKai', 'Kaiti SC', 'STKaiti', 'KaiTi', serif;
+  font-family: var(--hand-font, 'LXGW WenKai', 'Kaiti SC', 'STKaiti', 'KaiTi', serif);
   font-size: 40px;
   white-space: pre;
 }
@@ -688,6 +816,25 @@ function petals(f) {
   z-index: 5;
   pointer-events: none;
   will-change: transform;
+}
+
+/* 针鼻拖线层（连到线球） */
+.thread-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 4;
+  pointer-events: none;
+}
+
+/* 彩色线球（右下角，可略微探出布面） */
+.yarn {
+  position: absolute;
+  right: 34px;
+  bottom: -24px;
+  z-index: 4;
+  filter: drop-shadow(0 4px 8px rgba(120, 60, 80, 0.3));
 }
 
 .needle-svg {
@@ -774,6 +921,114 @@ function petals(f) {
 }
 .btn.primary:hover {
   background: #35508a;
+}
+
+/* ---------------- 工具瓦片栏 ---------------- */
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 4px;
+  margin-bottom: 10px;
+}
+
+.tile {
+  flex: 1;
+  min-width: 58px;
+  max-width: 78px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  background: transparent;
+  border: none;
+  padding: 2px 0;
+  cursor: pointer;
+  font: inherit;
+}
+
+.tile-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #6b5560;
+  background: #fde3ec;
+  box-shadow:
+    0 2px 5px rgba(150, 85, 100, 0.16),
+    inset 0 0 0 2px rgba(255, 255, 255, 0.65);
+  transition: transform 0.12s ease;
+}
+
+.tile:hover .tile-icon {
+  transform: translateY(-2px);
+}
+.tile:active .tile-icon {
+  transform: scale(0.93);
+}
+.tile.on .tile-icon {
+  outline: 2px solid #3f5f9e;
+}
+
+.t1 { background: #dce9fb; }
+.t2 { background: #fde3ec; }
+.t3 { background: #e6def7; }
+.t4 { background: #ddf2e3; }
+.t5 { background: #fdf0d9; }
+.t6 { background: #fce9e2; }
+.t7 { background: #e2f0fa; }
+.t8 { background: #f3e6f7; }
+.t9 { background: #fbe6e6; }
+
+.tile-label {
+  font-size: 12px;
+  color: #8a5a68;
+  letter-spacing: 0.05em;
+}
+
+/* ---------------- 绣线色盘 ---------------- */
+.swatches {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: -2px 0 10px;
+}
+
+.swatch {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+  cursor: pointer;
+  font: inherit;
+  font-size: 10px;
+  color: #fff;
+  padding: 0;
+}
+.swatch.on {
+  outline: 2.5px solid #3f5f9e;
+  outline-offset: 2px;
+}
+.swatch.auto {
+  background: conic-gradient(#c0504d, #d16a8a, #8455a8, #3f5f9e, #4f8a54, #7ea13f, #c0504d);
+  font-weight: 700;
+}
+.swatch.custom {
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #fff;
+}
+.swatch.custom input {
+  position: absolute;
+  inset: -8px;
+  opacity: 0;
+  cursor: pointer;
 }
 
 .status {
