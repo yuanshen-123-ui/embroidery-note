@@ -48,7 +48,7 @@ const setCellRef = (id) => (el) => {
 
 /* ---------------- 笔画数据：同源优先，CDN 多级兜底 ---------------- */
 const DATA_SOURCES = [
-  'hanzi-data/',                                              // 本地后端 / 自托管
+  'hanzi-data/',                                              // 本地后端 / 自托管 / Pages 同源
   'https://cdn.jsdelivr.net/npm/hanzi-writer-data@2.0/',
   'https://fastly.jsdelivr.net/npm/hanzi-writer-data@2.0/',
   'https://unpkg.com/hanzi-writer-data@2.0/',
@@ -59,7 +59,7 @@ async function fetchCharData(ch) {
   let lastErr
   for (const base of DATA_SOURCES) {
     try {
-      const res = await fetch(base + name, { signal: AbortSignal.timeout(6000) })
+      const res = await fetch(base + name, { signal: AbortSignal.timeout(4000) })
       if (!res.ok) throw new Error(String(res.status))
       const data = await res.json()
       if (!data.strokes || !data.medians) throw new Error('bad data')
@@ -451,6 +451,8 @@ function petals(f) {
         <template v-for="item in stitched" :key="item.id">
           <div v-if="item.type === 'nl'" class="nl"></div>
           <div v-else-if="item.type === 'cjk'" class="char-cell">
+            <!-- 描红底稿：入队即刻可见，针随后沿底稿绣出 -->
+            <span class="ghost" aria-hidden="true">{{ item.ch }}</span>
             <div :ref="setCellRef(item.id)" class="writer-host"></div>
           </div>
           <span v-else class="plain-ch" :style="{ color: item.color }">{{ item.ch }}</span>
@@ -578,10 +580,33 @@ function petals(f) {
   gap: 0 3px;
 }
 
+.char-cell {
+  position: relative; /* 让底稿 .ghost 定位在本格子内 */
+}
+
 .char-cell,
 .writer-host {
   width: 76px;
   height: 76px;
+}
+
+/* 描红底稿：排在绣层下面 */
+.ghost {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: 'LXGW WenKai', 'Kaiti SC', 'STKaiti', 'KaiTi', serif;
+  font-size: 52px;
+  color: rgba(63, 95, 158, 0.16);
+  user-select: none;
+}
+
+.writer-host {
+  position: relative;
+  z-index: 1;
 }
 
 .writer-host :deep(svg) {
