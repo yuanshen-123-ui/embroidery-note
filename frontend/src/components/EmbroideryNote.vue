@@ -349,8 +349,7 @@ async function generateImage() {
 }
 
 onMounted(async () => {
-  enqueueText(LOCAL_NOTES[0].text) // 开场自动绣默认文案
-  /* GitHub Pages 等纯静态环境没有后端，直接走内置文案，不发必失败的探测请求 */
+  /* 不自动开绣：空布面等待用户输入 */
   const isStaticHost = /\.github\.io$|\.gitee\.io$/.test(location.hostname)
   if (isStaticHost) {
     apiOk.value = false
@@ -474,6 +473,9 @@ function petals(f) {
 
       <!-- 绣字区：便签正文，逐字绣出 -->
       <div class="note-text">
+        <div v-if="!stitched.length" class="empty-hint">
+          在下方输入文字，就开始一针一针绣出来 ✧
+        </div>
         <template v-for="item in stitched" :key="item.id">
           <div v-if="item.type === 'nl'" class="nl"></div>
           <div
@@ -645,6 +647,17 @@ function petals(f) {
 
 .writer-host :deep(svg) {
   display: block;
+}
+
+.empty-hint {
+  color: rgba(63, 95, 158, 0.35);
+  font-size: 17px;
+  letter-spacing: 0.1em;
+  align-self: center;
+  width: 100%;
+  text-align: center;
+  padding-top: 90px;
+  user-select: none;
 }
 
 .plain-ch {
