@@ -81,17 +81,22 @@ function setNeedle(x, y) {
   }
 }
 
-/* 沿等弧长采样点按进度取点（rAF + 线性插值，与 hanzi-writer 同步） */
+/* 沿等弧长采样点按进度取点（rAF + 线性插值，与 hanzi-writer 同步）
+   注意：rAF 帧时间戳可能早于 t0（vsync 对齐），必须把进度钳制在 [0,1]，
+   否则负索引会让整个播放队列崩溃 —— 这正是"针不动/画不出"的元凶 */
 function animateAlong(pts, ms, gen) {
   return new Promise((resolve) => {
     const t0 = performance.now()
+    const safeMs = Number.isFinite(ms) && ms > 0 ? ms : 400
     const step = (now) => {
       if (gen !== playGen) return resolve()
-      const p = Math.min(1, (now - t0) / ms)
+      const p = Math.max(0, Math.min(1, (now - t0) / safeMs))
       const f = p * (pts.length - 1)
-      const i = Math.min(Math.floor(f), pts.length - 2)
-      const t = f - i
-      setNeedle(pts[i][0] + (pts[i + 1][0] - pts[i][0]) * t, pts[i][1] + (pts[i + 1][1] - pts[i][1]) * t)
+      const i = Math.max(0, Math.min(Math.floor(f), pts.length - 2))
+      const a = pts[i]
+      const b = pts[i + 1] || a
+      if (!a) return resolve()
+      setNeedle(a[0] + (b[0] - a[0]) * ((f - i) || 0), a[1] + (b[1] - a[1]) * ((f - i) || 0))
       if (p < 1) requestAnimationFrame(step)
       else resolve()
     }
@@ -125,9 +130,14 @@ function resampleByArc(median, n = 72) {
 }
 /* 用 DOM 精确测量笔画 path 长度，套 hanzi-writer 时长公式 (len+600)/(3*speed) */
 function domPathLength(d) {
-  const p = document.createElementNS('http://www.w3.org/2000/svg', 'path')
-  p.setAttribute('d', d)
-  return p.getTotalLength()
+  try {
+    const p = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+    p.setAttribute('d', d)
+    const len = p.getTotalLength()
+    return Number.isFinite(len) ? len : 0
+  } catch {
+    return 0
+  }
 }
 
 /* ---------------- 逐字绣制 ---------------- */
@@ -196,17 +206,24 @@ async function playItem(item, gen) {
   for (let i = 0; i < strokeScreens.length; i++) {
     if (gen !== playGen) return
     const pts = strokeScreens[i]
+    if (!pts || !pts.length) continue
     status.value = `「${item.ch}」第 ${i + 1}/${strokeScreens.length} 笔`
     setNeedle(pts[0][0], pts[0][1])
-    const needleDone = animateAlong(pts, durations[i], gen)
-    /* animateStroke(i) 逐笔播放，onComplete 后播下一笔 */
-    await new Promise((res) => {
+    /* 兜底：单笔动画即使失败/卡死也不拖垮整个队列 */
+    const strokePromise = new Promise((res) => {
       try {
         writer.animateStroke(i, { onComplete: res })
       } catch {
         res()
       }
     })
+    strokePromise.catch(() => {})
+    const needleDone = animateAlong(pts, durations[i], gen)
+    /* animateStroke(i) 逐笔播放，onComplete 后播下一笔 */
+    await Promise.race([
+      strokePromise,
+      new Promise((res) => setTimeout(res, (durations[i] || 600) * 2 + 2500)),
+    ])
     await needleDone
     setNeedle(pts[pts.length - 1][0], pts[pts.length - 1][1])
   }
