@@ -6,7 +6,6 @@ import Icon from './Icon.vue'
 /* ---------------- 常量 ---------------- */
 const CELL = 76           // 单字格子
 const PAD = 4
-const SPEED = 1.1         // 与 hanzi-writer strokeAnimationSpeed 一致，针画同步
 const MAX_CHARS = 72
 const PALETTE = ['#c0504d', '#4f8a54', '#3f5f9e', '#8455a8', '#7ea13f', '#d16a8a']
 const BLUE = '#3f5f9e'
@@ -199,7 +198,13 @@ async function playItem(item, gen) {
   }
 
   const strokeScreens = data.medians.map((m) => resampleByArc(m).map(toScreen))
-  const durations = data.strokes.map((d) => (domPathLength(d) + 600) / (3 * SPEED))
+
+  /* 每字自适应速度：无论笔画多少，总时长约 1.5–2s
+     hanzi-writer 单笔时长 = (len+600)/(3×speed)，按总时长反解 speed，针用同一速度保持同步 */
+  const TARGET_MS = 1500 + Math.random() * 350 // 1.5–1.85s（实测含轮询误差约 1.6–2.0s）
+  const totalUnits = data.strokes.reduce((s, d) => s + domPathLength(d) + 600, 0)
+  const charSpeed = Math.min(4.5, Math.max(0.8, totalUnits / (3 * TARGET_MS)))
+  const durations = data.strokes.map((d) => (domPathLength(d) + 600) / (3 * charSpeed))
 
   const writer = HanziWriter.create(host, item.ch, {
     width: CELL,
@@ -207,8 +212,8 @@ async function playItem(item, gen) {
     padding: PAD,
     strokeColor: item.color,
     radicalColor: null,
-    strokeAnimationSpeed: SPEED,
-    delayBetweenStrokes: 150,
+    strokeAnimationSpeed: charSpeed,
+    delayBetweenStrokes: 0,
     showOutline: true,
     outlineColor: '#e9ddc8',
     showCharacter: false,
