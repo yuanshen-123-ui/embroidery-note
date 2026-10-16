@@ -230,12 +230,14 @@ def draw_text_block(img: Image.Image, text: str, box, font, font_size, rng: rand
         x = x0
         for ch in line:
             color = PALETTE[rng.randrange(len(PALETTE))]
+            # 手写歪斜：±3–8° 旋转、±2–4px 上下错落
+            rot = (3 + rng.random() * 5) * (1 if rng.random() < 0.5 else -1)
+            dy = (2 + rng.random() * 2) * (1 if rng.random() < 0.5 else -1)
             tile = Image.new("RGBA", (int(pad), int(pad)), (0, 0, 0, 0))
             td = ImageDraw.Draw(tile)
             td.text((pad / 2, pad / 2), ch, font=font, fill=color)
-            rot = tile.rotate(rng.uniform(-5, 5), resample=Image.BICUBIC)
-            dy = rng.uniform(-2.5, 2.5)
-            img.alpha_composite(rot, (int(x - pad / 2), int(y + dy - pad / 2)))
+            rot_img = tile.rotate(rot, resample=Image.BICUBIC)
+            img.alpha_composite(rot_img, (int(x - pad / 2), int(y + dy - pad / 2)))
             x += font.getlength(ch)
         y += line_height
         if y > y1:

@@ -148,16 +148,21 @@ async function playItem(item, gen) {
   const card = cardEl.value
   if (!host || !card || gen !== playGen) return
 
-  const cardRect = card.getBoundingClientRect()
-  const hostRect = host.getBoundingClientRect()
-  const ox = hostRect.left - cardRect.left
-  const oy = hostRect.top - cardRect.top
+  /* 格子原点：用 offset 链取"未旋转"的布局位置（transform 不影响 offsetLeft/Top） */
+  let ox = 0
+  let oy = 0
+  let el = host
+  while (el && el !== card) {
+    ox += el.offsetLeft
+    oy += el.offsetTop
+    el = el.offsetParent
+  }
 
   /* 非汉字：针跳到格子中央，直接以彩色文字呈现 */
   if (item.type !== 'cjk') {
     threadColor.value = item.color
     needleVisible.value = true
-    await glide({ x: ox + CELL / 2, y: oy + CELL / 2 }, 240, gen)
+    await glide({ x: ox + CELL / 2, y: oy + CELL / 2 + (item.dy || 0) }, 240, gen)
     return
   }
 
@@ -169,16 +174,29 @@ async function playItem(item, gen) {
     item.type = 'plain' // 数据不可得（如离线）：回退彩色文字
     threadColor.value = item.color
     needleVisible.value = true
-    await glide({ x: ox + CELL / 2, y: oy + CELL / 2 }, 240, gen)
+    await glide({ x: ox + CELL / 2, y: oy + CELL / 2 + (item.dy || 0) }, 240, gen)
     return
   }
   if (gen !== playGen) return
 
   /* getScalingTransform：transform = translate(x, H−y) scale(s, −s)
-     ⇒ screen = (ox + x + s·px, oy + (H−y) − s·py)，数据坐标 x∈[0,1024]、y∈[−124,900]（y 朝上） */
+     ⇒ 格内坐标 = (x + s·px, (H−y) − s·py)，数据坐标 x∈[0,1024]、y∈[−124,900]（y 朝上）
+     再叠加与 CSS 一致的格子旋转 rotate(rot) translateY(dy)，让针贴住歪斜后的笔画 */
   const st = HanziWriter.getScalingTransform(CELL, CELL, PAD)
   const ty = CELL - st.y
-  const toScreen = (p) => [ox + st.x + st.scale * p[0], oy + ty - st.scale * p[1]]
+  const th = ((item.rot || 0) * Math.PI) / 180
+  const cos = Math.cos(th)
+  const sin = Math.sin(th)
+  const dyv = item.dy || 0
+  const ccx = CELL / 2
+  const ccy = CELL / 2
+  const toScreen = (p) => {
+    const x = st.x + st.scale * p[0]
+    const y = ty - st.scale * p[1]
+    const rx = (x - ccx) * cos - (y - ccy) * sin - sin * dyv
+    const ry = (x - ccx) * sin + (y - ccy) * cos + cos * dyv
+    return [ox + ccx + rx, oy + ccy + ry]
+  }
 
   const strokeScreens = data.medians.map((m) => resampleByArc(m).map(toScreen))
   const durations = data.strokes.map((d) => (domPathLength(d) + 600) / (3 * SPEED))
@@ -239,7 +257,15 @@ function enqueueText(str) {
     }
     const item = ch === '\n'
       ? { id: ++uid, ch, type: 'nl', color: '' }
-      : { id: ++uid, ch, color: PALETTE[colorIdx++ % PALETTE.length], type: IS_CJK(ch) ? 'cjk' : 'plain' }
+      : {
+          id: ++uid,
+          ch,
+          color: PALETTE[colorIdx++ % PALETTE.length],
+          type: IS_CJK(ch) ? 'cjk' : 'plain',
+          // 手写歪斜：每字独立随机，重播/刷新时重新生成
+          rot: (3 + Math.random() * 5) * (Math.random() < 0.5 ? -1 : 1), // ±3–8°
+          dy: (2 + Math.random() * 2) * (Math.random() < 0.5 ? -1 : 1),  // ±2–4px
+        }
     stitched.value.push(item)
     if (item.type !== 'nl') {
       const gen = playGen
@@ -450,12 +476,20 @@ function petals(f) {
       <div class="note-text">
         <template v-for="item in stitched" :key="item.id">
           <div v-if="item.type === 'nl'" class="nl"></div>
-          <div v-else-if="item.type === 'cjk'" class="char-cell">
+          <div
+            v-else-if="item.type === 'cjk'"
+            class="char-cell"
+            :style="{ transform: `rotate(${item.rot}deg) translateY(${item.dy}px)` }"
+          >
             <!-- 描红底稿：入队即刻可见，针随后沿底稿绣出 -->
             <span class="ghost" aria-hidden="true">{{ item.ch }}</span>
             <div :ref="setCellRef(item.id)" class="writer-host"></div>
           </div>
-          <span v-else class="plain-ch" :style="{ color: item.color }">{{ item.ch }}</span>
+          <span
+            v-else
+            class="plain-ch"
+            :style="{ color: item.color, transform: `rotate(${item.rot}deg) translateY(${item.dy}px)` }"
+          >{{ item.ch }}</span>
         </template>
       </div>
 
