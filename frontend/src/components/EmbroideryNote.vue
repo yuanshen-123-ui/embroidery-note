@@ -324,6 +324,12 @@ async function generateImage() {
 
 onMounted(async () => {
   enqueueText(LOCAL_NOTES[0].text) // 开场自动绣默认文案
+  /* GitHub Pages 等纯静态环境没有后端，直接走内置文案，不发必失败的探测请求 */
+  const isStaticHost = /\.github\.io$|\.gitee\.io$/.test(location.hostname)
+  if (isStaticHost) {
+    apiOk.value = false
+    return
+  }
   try {
     const res = await fetch('/api/notes', { signal: AbortSignal.timeout(2500) })
     if (res.ok) {
@@ -332,7 +338,7 @@ onMounted(async () => {
       apiOk.value = true
     }
   } catch {
-    apiOk.value = false // GitHub Pages 等纯静态环境
+    apiOk.value = false
   }
 })
 
