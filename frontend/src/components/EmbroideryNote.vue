@@ -44,7 +44,9 @@ const cardEl = ref(null)
 const needleEl = ref(null)
 const threadPathEl = ref(null)
 const ballEl = ref(null)
+const cushionEl = ref(null)
 const ballCenter = { x: 0, y: 0 }
+let pending = 0 // 待绣字数：归零时针回收进针插
 
 let prevLen = 0
 let uid = 0
@@ -163,6 +165,22 @@ function domPathLength(d) {
   } catch {
     return 0
   }
+}
+
+/* 收针：队列空了，针滑回右上角针插里插着 */
+async function parkNeedle(gen) {
+  await nextTick()
+  const cushion = cushionEl.value
+  const card = cardEl.value
+  if (!cushion || !card || gen !== playGen) return
+  const br = cushion.getBoundingClientRect()
+  const cr = card.getBoundingClientRect()
+  await glide(
+    { x: br.left - cr.left + br.width * 0.52, y: br.top - cr.top + br.height * 0.42 },
+    420,
+    gen,
+  )
+  status.value = '收针 ✧ 布面等你下一句'
 }
 
 /* ---------------- 逐字绣制 ---------------- */
@@ -310,8 +328,15 @@ function enqueueText(str) {
         }
     stitched.value.push(item)
     if (item.type !== 'nl') {
+      pending++
       const gen = playGen
-      chain = chain.then(() => playItem(item, gen)).catch(() => {})
+      chain = chain
+        .then(() => playItem(item, gen))
+        .catch(() => {})
+        .then(() => {
+          pending = Math.max(0, pending - 1)
+          if (pending === 0 && needleVisible.value) parkNeedle(gen)
+        })
     }
   }
 }
@@ -480,6 +505,22 @@ const FLOWERS = [
   { x: 292, y: 42, r: 5 },
   { x: 342, y: 52, r: 6 },
 ]
+
+/* 布面毛边：四边伸出的布丝（模块加载时生成一次） */
+const frayLines = []
+{
+  const n = 26
+  for (let i = 0; i < n; i++) {
+    const t = 30 + (i + Math.random() * 0.7) * (660 / n)
+    const l = 4 + Math.random() * 9
+    const j = Math.random() * 6 - 3
+    frayLines.push({ x1: t.toFixed(1), y1: 2, x2: (t + j).toFixed(1), y2: (-l).toFixed(1) })
+    frayLines.push({ x1: t.toFixed(1), y1: 732, x2: (t + j).toFixed(1), y2: (732 + l).toFixed(1) })
+    const v = 30 + (i + Math.random() * 0.7) * (674 / n)
+    frayLines.push({ x1: 2, y1: v.toFixed(1), x2: (-l).toFixed(1), y2: (v + j).toFixed(1) })
+    frayLines.push({ x1: 718, y1: v.toFixed(1), x2: (718 + l).toFixed(1), y2: (v + j).toFixed(1) })
+  }
+}
 function petals(f) {
   const pts = []
   for (let k = 0; k < 5; k++) {
@@ -568,6 +609,28 @@ function petals(f) {
             :style="{ color: item.color, transform: `rotate(${item.rot}deg) translateY(${item.dy}px)` }"
           >{{ item.ch }}</span>
         </template>
+      </div>
+
+      <!-- 布面毛边（抽丝） -->
+      <svg class="fray-svg" viewBox="0 0 720 734" preserveAspectRatio="none" aria-hidden="true">
+        <line
+          v-for="(l, i) in frayLines" :key="'f' + i" v-bind="l"
+          :stroke="i % 2 ? 'rgba(255,255,255,.85)' : 'rgba(212,200,178,.75)'" stroke-width="1.4"
+        />
+      </svg>
+
+      <!-- 针插（空闲时针收回这里） -->
+      <div ref="cushionEl" class="pincushion" aria-hidden="true">
+        <svg viewBox="0 0 60 46" width="58" height="44">
+          <ellipse cx="30" cy="31" rx="26" ry="14" fill="#e895a6" />
+          <path d="M6 27 Q30 7 54 27" fill="none" stroke="#d67c90" stroke-width="2" />
+          <path d="M12 22 Q30 37 48 22" fill="none" stroke="#d67c90" stroke-width="2" />
+          <ellipse cx="30" cy="27" rx="4.5" ry="2.8" fill="#c96a80" />
+          <line x1="20" y1="25" x2="13" y2="7" stroke="#a9b2bf" stroke-width="2" />
+          <circle cx="13" cy="6" r="2.4" fill="#5b8fd6" />
+          <line x1="40" y1="25" x2="47" y2="8" stroke="#a9b2bf" stroke-width="2" />
+          <circle cx="47" cy="7" r="2.4" fill="#5aa86e" />
+        </svg>
       </div>
 
       <!-- 针鼻拖线（连到右下角线球） -->
@@ -835,6 +898,26 @@ function petals(f) {
   bottom: -24px;
   z-index: 4;
   filter: drop-shadow(0 4px 8px rgba(120, 60, 80, 0.3));
+}
+
+/* 针插（右上角，压着布边） */
+.pincushion {
+  position: absolute;
+  right: 46px;
+  top: -16px;
+  z-index: 6;
+  filter: drop-shadow(0 3px 6px rgba(120, 60, 80, 0.28));
+}
+
+/* 布面毛边 */
+.fray-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+  z-index: 0;
 }
 
 .needle-svg {
