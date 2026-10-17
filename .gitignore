@@ -1,10 +1,13 @@
-node_modules/
+锘縩ode_modules/
 dist/
 backend/hanzi-data/
 backend/__pycache__/
 *.pyc
 .DS_Store
 
-# 个人授权字体（仅个人使用，不随仓库分发）
+# 涓汉鎺堟潈瀛椾綋锛堜粎涓汉浣跨敤锛屼笉闅忎粨搴撳垎鍙戯級
 frontend/public/fonts/
 fonts/
+*.png
+!docs/*.png
+
