@@ -69,11 +69,12 @@ const DATA_SOURCES = [
   'https://fastly.jsdelivr.net/npm/hanzi-writer-data@2.0/',
   'https://unpkg.com/hanzi-writer-data@2.0/',
 ]
-async function fetchCharData(ch) {
+async function fetchCharData(ch, isAborted) {
   if (dataCache.has(ch)) return dataCache.get(ch)
   const name = encodeURIComponent(ch) + '.json'
   let lastErr
   for (const base of DATA_SOURCES) {
+    if (isAborted && isAborted()) throw new Error('cancelled')
     try {
       const res = await fetch(base + name, { signal: AbortSignal.timeout(4000) })
       if (!res.ok) throw new Error(String(res.status))
@@ -82,6 +83,7 @@ async function fetchCharData(ch) {
       dataCache.set(ch, data)
       return data
     } catch (e) {
+      if (isAborted && isAborted()) throw new Error('cancelled')
       lastErr = e
     }
   }
@@ -111,12 +113,12 @@ function setNeedle(x, y) {
 /* 沿等弧长采样点按进度取点（rAF + 线性插值，与 hanzi-writer 同步）
    注意：rAF 帧时间戳可能早于 t0（vsync 对齐），必须把进度钳制在 [0,1]，
    否则负索引会让整个播放队列崩溃 —— 这正是"针不动/画不出"的元凶 */
-function animateAlong(pts, ms, gen) {
+function animateAlong(pts, ms, gen, aborted) {
   return new Promise((resolve) => {
     const t0 = performance.now()
     const safeMs = Number.isFinite(ms) && ms > 0 ? ms : 400
     const step = (now) => {
-      if (gen !== playGen) return resolve()
+      if (gen !== playGen || (aborted && aborted())) return resolve()
       const p = Math.max(0, Math.min(1, (now - t0) / safeMs))
       const f = p * (pts.length - 1)
       const i = Math.max(0, Math.min(Math.floor(f), pts.length - 2))
@@ -130,8 +132,27 @@ function animateAlong(pts, ms, gen) {
     requestAnimationFrame(step)
   })
 }
-function glide(target, ms, gen) {
-  return animateAlong([[needlePos.x, needlePos.y], [target.x, target.y]], ms, gen)
+function glide(target, ms, gen, aborted) {
+  return animateAlong([[needlePos.x, needlePos.y], [target.x, target.y]], ms, gen, aborted)
+}
+
+/* 中断某个字的动画并清理其 writer（公开 API cancelQuiz + 内部 cancelAll 兜底） */
+function stopWriter(item) {
+  item.cancelled = true
+  try {
+    item.onCancel?.()
+  } catch {}
+  const w = item.writer
+  if (!w) return
+  try {
+    w.cancelQuiz?.()
+  } catch {}
+  try {
+    w._renderState?.cancelAll?.() // 中断进行中的 animateStroke（hanzi-writer 无公开等价方法）
+  } catch {}
+  try {
+    w.hideCharacter?.({ duration: 0 })
+  } catch {}
 }
 
 /* ---------------- 坐标转换工具 ---------------- */
@@ -167,7 +188,15 @@ function domPathLength(d) {
   }
 }
 
-/* 收针：队列空了，针滑回右上角针插里插着 */
+/* 收针：队列空了，针滑回右上角针插里插着（防重入） */
+let parking = false
+function maybePark(gen) {
+  if (parking) return
+  parking = true
+  parkNeedle(gen).finally(() => {
+    parking = false
+  })
+}
 async function parkNeedle(gen) {
   await nextTick()
   const cushion = cushionEl.value
@@ -187,9 +216,11 @@ async function parkNeedle(gen) {
 async function playItem(item, gen) {
   if (item.type === 'nl') return
   await nextTick()
+  if (item.cancelled) return
   const host = cellEls.get(item.id)
   const card = cardEl.value
   if (!host || !card || gen !== playGen) return
+  const dead = () => item.cancelled || gen !== playGen
 
   /* 线球锚点（相对卡片坐标，每次开播刷新一次） */
   if (ballEl.value) {
@@ -213,22 +244,23 @@ async function playItem(item, gen) {
   if (item.type !== 'cjk') {
     threadColor.value = item.color
     needleVisible.value = true
-    await glide({ x: ox + CELL / 2, y: oy + CELL / 2 + (item.dy || 0) }, 240, gen)
+    await glide({ x: ox + CELL / 2, y: oy + CELL / 2 + (item.dy || 0) }, 240, gen, () => item.cancelled)
     return
   }
 
   /* loadCharacterData：拿每一笔的 strokes(path) 与 medians(中线) */
   let data
   try {
-    data = await fetchCharData(item.ch)
+    data = await fetchCharData(item.ch, () => item.cancelled || gen !== playGen)
   } catch {
+    if (dead()) return // 删除回退已触发：不再做任何兜底动作
     item.type = 'plain' // 数据不可得（如离线）：回退彩色文字
     threadColor.value = item.color
     needleVisible.value = true
-    await glide({ x: ox + CELL / 2, y: oy + CELL / 2 + (item.dy || 0) }, 240, gen)
+    await glide({ x: ox + CELL / 2, y: oy + CELL / 2 + (item.dy || 0) }, 240, gen, () => item.cancelled)
     return
   }
-  if (gen !== playGen) return
+  if (dead()) return
 
   /* getScalingTransform：transform = translate(x, H−y) scale(s, −s)
      ⇒ 格内坐标 = (x + s·px, (H−y) − s·py)，数据坐标 x∈[0,1024]、y∈[−124,900]（y 朝上）
@@ -271,15 +303,17 @@ async function playItem(item, gen) {
     showCharacter: false,
     charDataLoader: (c, done) => done(data), // 复用已取到的数据
   })
+  item.writer = writer // 供删除回退时中断动画
 
   threadColor.value = item.color
   needleVisible.value = true
 
   /* 上一字绣完 → 针滑到本字第一笔起点 */
-  await glide({ x: strokeScreens[0][0][0], y: strokeScreens[0][0][1] }, 340, gen)
+  await glide({ x: strokeScreens[0][0][0], y: strokeScreens[0][0][1] }, 340, gen, () => item.cancelled)
+  if (dead()) return
 
   for (let i = 0; i < strokeScreens.length; i++) {
-    if (gen !== playGen) return
+    if (dead()) return
     const pts = strokeScreens[i]
     if (!pts || !pts.length) continue
     status.value = `「${item.ch}」第 ${i + 1}/${strokeScreens.length} 笔`
@@ -293,13 +327,18 @@ async function playItem(item, gen) {
       }
     })
     strokePromise.catch(() => {})
-    const needleDone = animateAlong(pts, durations[i], gen)
+    const needleDone = animateAlong(pts, durations[i], gen, () => item.cancelled)
+    /* 删除回退：该字被删时立即打断（onCancel 由 stopWriter 触发） */
+    const cancelSig = new Promise((res) => {
+      item.onCancel = res
+    })
     /* animateStroke(i) 逐笔播放，onComplete 后播下一笔 */
     await Promise.race([
-      strokePromise,
+      Promise.all([strokePromise, needleDone]),
+      cancelSig,
       new Promise((res) => setTimeout(res, (durations[i] || 600) * 2 + 2500)),
     ])
-    await needleDone
+    if (item.cancelled || gen !== playGen) return
     setNeedle(pts[pts.length - 1][0], pts[pts.length - 1][1])
   }
   status.value = `「${item.ch}」绣好了`
@@ -329,13 +368,17 @@ function enqueueText(str) {
     stitched.value.push(item)
     if (item.type !== 'nl') {
       pending++
+      item.counted = true
       const gen = playGen
       chain = chain
         .then(() => playItem(item, gen))
         .catch(() => {})
         .then(() => {
-          pending = Math.max(0, pending - 1)
-          if (pending === 0 && needleVisible.value) parkNeedle(gen)
+          if (item.counted) {
+            item.counted = false
+            pending = Math.max(0, pending - 1)
+          }
+          if (pending === 0 && needleVisible.value) maybePark(gen)
         })
     }
   }
@@ -344,14 +387,49 @@ function enqueueText(str) {
 function onInput() {
   if (composing.value) return
   const v = input.value
-  if (v.length > prevLen) enqueueText(v.slice(prevLen))
+  if (v.length > prevLen) {
+    enqueueText(v.slice(prevLen))
+  } else if (v.length < prevLen) {
+    /* 退格/删除：从绣布尾部移除对应数量的字（中断动画 + 清理实例 + 同步针） */
+    removeLast(prevLen - v.length)
+  }
   prevLen = v.length
+}
+/* 输入框为空但布面有字时，Backspace 直接剪布上的字 */
+function onBackspace(e) {
+  if (!input.value.length && stitched.value.length) {
+    removeLast(1)
+    e.preventDefault()
+  }
 }
 const composing = ref(false)
 
+/* 删除回退：移除布面尾部 n 个字（正在绣的立即中断，未绣的直接出队） */
+function removeLast(n = 1) {
+  const removed = []
+  for (let k = 0; k < n && stitched.value.length; k++) {
+    const item = stitched.value.pop()
+    removed.push(item)
+    if (item.type === 'nl') continue
+    stopWriter(item) // 置 cancelled + 中断 animateStroke + 清理 writer
+    if (item.counted) {
+      item.counted = false // 还没轮到它播，出队
+      pending = Math.max(0, pending - 1)
+    }
+  }
+  if (removed.length) {
+    status.value =
+      removed.length === 1 ? `剪掉了「${removed[0].ch}」` : `剪掉了 ${removed.length} 个字`
+    if (pending === 0 && needleVisible.value) maybePark(playGen)
+  }
+  return removed
+}
+
 function clearAll() {
   playGen++
+  stitched.value.forEach(stopWriter) // 中断所有在播/排队动画
   chain = Promise.resolve()
+  pending = 0
   stitched.value = []
   input.value = ''
   prevLen = 0
@@ -362,7 +440,9 @@ function clearAll() {
 function replay() {
   const seq = stitched.value.map((t) => t.ch).join('')
   playGen++
+  stitched.value.forEach(stopWriter)
   chain = Promise.resolve()
+  pending = 0
   stitched.value = []
   needleVisible.value = false
   enqueueText(seq)
@@ -372,7 +452,9 @@ async function randomNote() {
   const pool = notes.value.length ? notes.value : LOCAL_NOTES
   const note = pool[Math.floor(Math.random() * pool.length)]
   playGen++
+  stitched.value.forEach(stopWriter)
   chain = Promise.resolve()
+  pending = 0
   stitched.value = []
   input.value = ''
   prevLen = 0
@@ -422,10 +504,7 @@ async function pasteText() {
   }
 }
 function cutLast() {
-  const last = stitched.value[stitched.value.length - 1]
-  if (!last) return
-  stitched.value.pop()
-  status.value = `剪掉了「${last.ch}」`
+  removeLast(1)
 }
 
 async function generateImage() {  try {
@@ -731,6 +810,7 @@ function petals(f) {
         @compositionstart="composing = true"
         @compositionend="composing = false; onInput()"
         @input="onInput"
+        @keydown.delete="onBackspace"
       />
       <p class="status">{{ status }}</p>
     </div>
