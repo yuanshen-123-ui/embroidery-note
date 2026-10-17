@@ -34,13 +34,13 @@ npm run dev
 
 访问 `http://127.0.0.1:8000/`（构建产物）或 `http://127.0.0.1:5173/`（开发模式）。
 
-## 刺绣针的实现原理
+## 刺绣针与字形渲染的实现原理
 
-1. 每输入一个汉字，创建一个 `hanzi-writer` 实例，`animateStroke(i, { onComplete })` 从第 0 笔开始逐笔播放；
-2. `hanzi-writer` 的字符数据里每笔有一条 `medians` 运笔中线——把它按**弧长均匀重采样**成点序列；
-3. 针的动画时长与 hanzi-writer 完全同源：`(path.getTotalLength() + 600) / (3 × strokeAnimationSpeed)`，`requestAnimationFrame` 按进度取点，二者同步走完；
-4. `HanziWriter.getScalingTransform()` 做数据坐标 → 屏幕坐标转换。注意其 transform 为 `translate(x, H−y) scale(s, −s)`（数据坐标 `x∈[0,1024]`、`y∈[−124,900]`，y 轴朝上），因此 `screen = (x + s·px, (H−y) − s·py)`；
-5. 针位置每帧用 `transform: translate()` 更新（绕过 Vue 响应式）；一个字绣完，针直线滑到下一个字的第一笔起点。
+1. **字形（中文）**：不再用 hanzi-writer 的内置 SVG 路径画字，而是 **手写字体 + SVG `<text>` 描边动画**——`stroke-dasharray/stroke-dashoffset` 逐段"写"出轮廓，最后 40% 时长内淡入填充成实色绣线。字形完全跟随 `font-family`（文楷/行楷/幼圆可切换）。
+2. **字形（非中文）**：字母、标点、颜文字等直接 DOM 渲染（同样跟随手写字体），带打字机式擦除 + 淡入动画；中文与非中文自动分流，不会去请求不存在的笔画数据。
+3. **针的走针路线**：读取 hanzi-writer-data 的 `medians`（运笔中线），按**弧长均匀重采样**成点序列，`requestAnimationFrame` 按进度取点，每字总时长约 1.5–2s；与字形描边动画共用同一个 `--dur`，同屏同步。
+4. **坐标转换**：自行实现与 `getScalingTransform` 等价的变换（数据包围盒 `x∈[0,1024]`、`y∈[−124,900]`、y 轴朝上），再叠加格子旋转 `rotate(rot) translateY(dy)`，让针贴住歪斜后的字形；针位置每帧用 `transform: translate()` 更新。
+5. **删除回退**：退格即中断对应字的描边动画与针的跟随、清理 DOM 实例，`pending` 计数精确同步，队列空时针收回针插，画面无残留。
 
 ## API（有后端时）
 
