@@ -36,8 +36,9 @@ npm run dev
 
 ## 刺绣针与字形渲染的实现原理
 
-1. **字形（中文）**：不再用 hanzi-writer 的内置 SVG 路径画字，而是 **手写字体 + SVG `<text>` 描边动画**——`stroke-dasharray/stroke-dashoffset` 逐段"写"出轮廓，最后 40% 时长内淡入填充成实色绣线。字形完全跟随 `font-family`（文楷/行楷/幼圆可切换）。
+1. **字形（中文）**：不再用 hanzi-writer 的内置 SVG 路径画字，而是 **手写字体 + SVG `<text>` 描边动画**——`stroke-dasharray/stroke-dashoffset` 逐段"写"出轮廓，最后 40% 时长内淡入填充成实色绣线。字形完全跟随 `font-family`（工具栏「字体」可切换：手写 / 善政 / 龙藏 / 文楷）。
 2. **字形（非中文）**：字母、标点、颜文字等直接 DOM 渲染（同样跟随手写字体），带打字机式擦除 + 淡入动画；中文与非中文自动分流，不会去请求不存在的笔画数据。
+3. **手写字体的来源（重要）**：默认手写体是博主 hi.jessie 的 **「hiJessie 手写体」**（https://hijessie.space/fontstudio/hijessie.otf），作者声明**仅供个人使用、请勿商用或转卖**。因此本仓库**不包含该字体**（`frontend/public/fonts/` 已 gitignore，GitHub Pages 上也不会分发）；本地把该 OTF 放到 `frontend/public/fonts/hiJessie1.otf` 即自动启用。未安装/未放置时自动回退到开源手写体 [Ma Shan Zheng](https://fonts.google.com/specimen/Ma+Shan+Zheng)、[Long Cang](https://fonts.google.com/specimen/Long+Cang) 与霞鹜文楷。
 3. **针的走针路线**：读取 hanzi-writer-data 的 `medians`（运笔中线），按**弧长均匀重采样**成点序列，`requestAnimationFrame` 按进度取点，每字总时长约 1.5–2s；与字形描边动画共用同一个 `--dur`，同屏同步。
 4. **坐标转换**：自行实现与 `getScalingTransform` 等价的变换（数据包围盒 `x∈[0,1024]`、`y∈[−124,900]`、y 轴朝上），再叠加格子旋转 `rotate(rot) translateY(dy)`，让针贴住歪斜后的字形；针位置每帧用 `transform: translate()` 更新。
 5. **删除回退**：退格即中断对应字的描边动画与针的跟随、清理 DOM 实例，`pending` 计数精确同步，队列空时针收回针插，画面无残留。

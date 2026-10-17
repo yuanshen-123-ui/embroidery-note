@@ -32,9 +32,12 @@ const threadMode = ref('auto')  // 'auto' 或具体颜色
 const pickerOpen = ref(false)
 const fontIdx = ref(0)
 const FONTS = [
-  { name: '文楷', css: "'LXGW WenKai','Kaiti SC','STKaiti','KaiTi',serif" },
-  { name: '行楷', css: "'STXingkai','Xingkai SC','KaiTi','LXGW WenKai',serif" },
-  { name: '幼圆', css: "'YouYuan','Yuanti SC','LXGW WenKai','KaiTi',serif" },
+  // 手写：本地版注入 hiJessieHW（作者仅授权个人使用，字体文件不进仓库/不上 Pages）；
+  // 若系统装过该字体则 hit 名字 hiJessie1；公开站点回退开源手写体
+  { name: '手写', css: "'hiJessieHW', 'hiJessie1', 'Ma Shan Zheng', 'LXGW WenKai', 'Kaiti SC', 'KaiTi', serif" },
+  { name: '善政', css: "'Ma Shan Zheng', 'hiJessieHW', 'LXGW WenKai', 'KaiTi', serif" },
+  { name: '龙藏', css: "'Long Cang', 'hiJessieHW', 'LXGW WenKai', 'KaiTi', serif" },
+  { name: '文楷', css: "'LXGW WenKai', 'Kaiti SC', 'STKaiti', 'KaiTi', serif" },
 ]
 const handFont = computed(() => FONTS[fontIdx.value].css)
 const customColor = ref('#3f5f9e')
@@ -499,6 +502,21 @@ async function generateImage() {  try {
 onMounted(async () => {
   /* 不自动开绣：空布面等待用户输入 */
   const isStaticHost = /\.github\.io$|\.gitee\.io$/.test(location.hostname)
+  /* 本地版注入手写字体（字体文件 public/fonts 已被 gitignore，仓库/Pages 不含它；
+     作者声明仅个人使用，故只在本地使用，不公开分发） */
+  if (!isStaticHost) {
+    try {
+      const probe = await fetch('fonts/hiJessie1.otf', { method: 'HEAD', signal: AbortSignal.timeout(1500) })
+      if (probe.ok) {
+        const st = document.createElement('style')
+        st.textContent =
+          "@font-face{font-family:'hiJessieHW';src:url('fonts/hiJessie1.otf') format('opentype');font-display:swap}"
+        document.head.appendChild(st)
+      }
+    } catch {
+      /* 字体不存在则用回退字体 */
+    }
+  }
   if (isStaticHost) {
     apiOk.value = false
     return

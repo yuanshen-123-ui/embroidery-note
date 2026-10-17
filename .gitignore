@@ -4,3 +4,7 @@ backend/hanzi-data/
 backend/__pycache__/
 *.pyc
 .DS_Store
+
+# 个人授权字体（仅个人使用，不随仓库分发）
+frontend/public/fonts/
+fonts/
