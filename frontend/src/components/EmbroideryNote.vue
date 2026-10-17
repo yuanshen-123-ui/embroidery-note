@@ -1,6 +1,5 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
-import HanziWriter from 'hanzi-writer'
 import Icon from './Icon.vue'
 
 /* ---------------- 常量 ---------------- */
@@ -62,6 +61,11 @@ const setCellRef = (id) => (el) => {
   else cellEls.delete(id)
 }
 
+/* 手写歪斜内联样式（汉字格 / 普通字符共用） */
+function tiltStyle(item) {
+  return { transform: `rotate(${item.rot}deg) translateY(${item.dy}px)` }
+}
+
 /* ---------------- 笔画数据：同源优先，CDN 多级兜底 ---------------- */
 const DATA_SOURCES = [
   'hanzi-data/',                                              // 本地后端 / 自托管 / Pages 同源
@@ -92,6 +96,7 @@ async function fetchCharData(ch, isAborted) {
 
 /* ---------------- 针驱动：直接写 transform，绕过响应式开销 ---------------- */
 function setNeedle(x, y) {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return // 防御：异常坐标不污染针/拖线
   needlePos.x = x
   needlePos.y = y
   if (needleEl.value) {
@@ -136,22 +141,11 @@ function glide(target, ms, gen, aborted) {
   return animateAlong([[needlePos.x, needlePos.y], [target.x, target.y]], ms, gen, aborted)
 }
 
-/* 中断某个字的动画并清理其 writer（公开 API cancelQuiz + 内部 cancelAll 兜底） */
+/* 中断某个字的动画：置取消标记，唤醒播放循环（渲染已改为 CSS 描边，无需操作 writer） */
 function stopWriter(item) {
   item.cancelled = true
   try {
     item.onCancel?.()
-  } catch {}
-  const w = item.writer
-  if (!w) return
-  try {
-    w.cancelQuiz?.()
-  } catch {}
-  try {
-    w._renderState?.cancelAll?.() // 中断进行中的 animateStroke（hanzi-writer 无公开等价方法）
-  } catch {}
-  try {
-    w.hideCharacter?.({ duration: 0 })
   } catch {}
 }
 
@@ -176,16 +170,19 @@ function resampleByArc(median, n = 72) {
   }
   return out
 }
-/* 用 DOM 精确测量笔画 path 长度，套 hanzi-writer 时长公式 (len+600)/(3*speed) */
-function domPathLength(d) {
-  try {
-    const p = document.createElementNS('http://www.w3.org/2000/svg', 'path')
-    p.setAttribute('d', d)
-    const len = p.getTotalLength()
-    return Number.isFinite(len) ? len : 0
-  } catch {
-    return 0
-  }
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+/* 等价 hanzi-writer getScalingTransform 的坐标变换：
+   字符数据包围盒 x∈[0,1024]、y∈[−124,900]（y 轴朝上），
+   返回 {x, y, scale}，屏幕坐标 = (x + s·px, (H−y) − s·py) */
+function scalingTransform(width, height, padding) {
+  const PRE = 1024
+  const effW = width - 2 * padding
+  const effH = height - 2 * padding
+  const scale = Math.min(effW / PRE, effH / PRE)
+  const x = padding + (effW - scale * PRE) / 2
+  const y = 124 * scale + padding + (effH - scale * PRE) / 2
+  return { x, y, scale }
 }
 
 /* 收针：队列空了，针滑回右上角针插里插着（防重入） */
@@ -248,7 +245,8 @@ async function playItem(item, gen) {
     return
   }
 
-  /* loadCharacterData：拿每一笔的 strokes(path) 与 medians(中线) */
+  /* 笔画数据仅用于针的走针路线（medians）；字形改用"手写字体 + CSS 描边动画"渲染，
+     这样字体跟随 font-family，而不再受 hanzi-writer 内置 SVG 路径限制 */
   let data
   try {
     data = await fetchCharData(item.ch, () => item.cancelled || gen !== playGen)
@@ -262,10 +260,9 @@ async function playItem(item, gen) {
   }
   if (dead()) return
 
-  /* getScalingTransform：transform = translate(x, H−y) scale(s, −s)
-     ⇒ 格内坐标 = (x + s·px, (H−y) − s·py)，数据坐标 x∈[0,1024]、y∈[−124,900]（y 朝上）
-     再叠加与 CSS 一致的格子旋转 rotate(rot) translateY(dy)，让针贴住歪斜后的笔画 */
-  const st = HanziWriter.getScalingTransform(CELL, CELL, PAD)
+  /* 数据坐标 → 格内坐标（等价 hanzi-writer getScalingTransform，y 翻转），
+     再叠加与 CSS 一致的格子旋转 rotate(rot) translateY(dy)，让针贴住歪斜后的字形 */
+  const st = scalingTransform(CELL, CELL, PAD)
   const ty = CELL - st.y
   const th = ((item.rot || 0) * Math.PI) / 180
   const cos = Math.cos(th)
@@ -281,66 +278,38 @@ async function playItem(item, gen) {
     return [ox + ccx + rx, oy + ccy + ry]
   }
 
-  const strokeScreens = data.medians.map((m) => resampleByArc(m).map(toScreen))
-
-  /* 每字自适应速度：无论笔画多少，总时长约 1.5–2s
-     hanzi-writer 单笔时长 = (len+600)/(3×speed)，按总时长反解 speed，针用同一速度保持同步 */
-  const TARGET_MS = 1500 + Math.random() * 350 // 1.5–1.85s（实测含轮询误差约 1.6–2.0s）
-  const totalUnits = data.strokes.reduce((s, d) => s + domPathLength(d) + 600, 0)
-  const charSpeed = Math.min(4.5, Math.max(0.8, totalUnits / (3 * TARGET_MS)))
-  const durations = data.strokes.map((d) => (domPathLength(d) + 600) / (3 * charSpeed))
-
-  const writer = HanziWriter.create(host, item.ch, {
-    width: CELL,
-    height: CELL,
-    padding: PAD,
-    strokeColor: item.color,
-    radicalColor: null,
-    strokeAnimationSpeed: charSpeed,
-    delayBetweenStrokes: 0,
-    showOutline: true,
-    outlineColor: '#e9ddc8',
-    showCharacter: false,
-    charDataLoader: (c, done) => done(data), // 复用已取到的数据
-  })
-  item.writer = writer // 供删除回退时中断动画
+  /* 针走全部笔画中线（拼接成一条连续针路），总时长 1.5–2s；
+     字形描边动画（stroke-dashoffset）用同一个 --dur，二者同屏同步 */
+  const allPts = []
+  for (const m of data.medians) allPts.push(...resampleByArc(m).map(toScreen))
+  if (!allPts.length) {
+    item.type = 'plain'
+    return
+  }
+  const dur = 1500 + Math.random() * 350
+  host.style.setProperty('--dur', `${dur | 0}ms`)
+  host.classList.add('stitch')
 
   threadColor.value = item.color
   needleVisible.value = true
 
-  /* 上一字绣完 → 针滑到本字第一笔起点 */
-  await glide({ x: strokeScreens[0][0][0], y: strokeScreens[0][0][1] }, 340, gen, () => item.cancelled)
+  /* 上一字绣完 → 针滑到本字针路起点 */
+  await glide(allPts[0], 340, gen, () => item.cancelled)
   if (dead()) return
 
-  for (let i = 0; i < strokeScreens.length; i++) {
-    if (dead()) return
-    const pts = strokeScreens[i]
-    if (!pts || !pts.length) continue
-    status.value = `「${item.ch}」第 ${i + 1}/${strokeScreens.length} 笔`
-    setNeedle(pts[0][0], pts[0][1])
-    /* 兜底：单笔动画即使失败/卡死也不拖垮整个队列 */
-    const strokePromise = new Promise((res) => {
-      try {
-        writer.animateStroke(i, { onComplete: res })
-      } catch {
-        res()
-      }
-    })
-    strokePromise.catch(() => {})
-    const needleDone = animateAlong(pts, durations[i], gen, () => item.cancelled)
-    /* 删除回退：该字被删时立即打断（onCancel 由 stopWriter 触发） */
-    const cancelSig = new Promise((res) => {
-      item.onCancel = res
-    })
-    /* animateStroke(i) 逐笔播放，onComplete 后播下一笔 */
-    await Promise.race([
-      Promise.all([strokePromise, needleDone]),
-      cancelSig,
-      new Promise((res) => setTimeout(res, (durations[i] || 600) * 2 + 2500)),
-    ])
-    if (item.cancelled || gen !== playGen) return
-    setNeedle(pts[pts.length - 1][0], pts[pts.length - 1][1])
-  }
+  status.value = `「${item.ch}」走针中`
+  setNeedle(allPts[0][0], allPts[0][1])
+  const cancelSig = new Promise((res) => {
+    item.onCancel = res
+  })
+  const needleDone = animateAlong(allPts, dur, gen, () => item.cancelled)
+  await Promise.race([
+    Promise.all([sleep(dur), needleDone]),
+    cancelSig,
+    sleep(dur + 3000),
+  ])
+  if (item.cancelled || gen !== playGen) return
+  setNeedle(allPts[allPts.length - 1][0], allPts[allPts.length - 1][1])
   status.value = `「${item.ch}」绣好了`
 }
 
@@ -676,11 +645,15 @@ function petals(f) {
           <div
             v-else-if="item.type === 'cjk'"
             class="char-cell"
-            :style="{ transform: `rotate(${item.rot}deg) translateY(${item.dy}px)` }"
+            :style="tiltStyle(item)"
           >
-            <!-- 描红底稿：入队即刻可见，针随后沿底稿绣出 -->
+            <!-- 描红底稿：入队即刻可见，随后手写字体描边覆盖 -->
             <span class="ghost" aria-hidden="true">{{ item.ch }}</span>
-            <div :ref="setCellRef(item.id)" class="writer-host"></div>
+            <div :ref="setCellRef(item.id)" class="writer-host">
+              <svg class="writer-svg" viewBox="0 0 76 76" aria-hidden="true">
+                <text class="stroke-text" x="38" y="41" text-anchor="middle" dominant-baseline="central" :style="{ color: item.color }">{{ item.ch }}</text>
+              </svg>
+            </div>
           </div>
           <span
             v-else
@@ -896,13 +869,12 @@ function petals(f) {
   position: relative; /* 让底稿 .ghost 定位在本格子内 */
 }
 
-.char-cell,
-.writer-host {
+.char-cell {
   width: 76px;
   height: 76px;
 }
 
-/* 描红底稿：排在绣层下面 */
+/* 描红底稿：排在描边层下面 */
 .ghost {
   position: absolute;
   inset: 0;
@@ -916,13 +888,49 @@ function petals(f) {
   user-select: none;
 }
 
+/* 手写字体描边层（div 锚点 + 内部 SVG text，跟随 font-family） */
 .writer-host {
   position: relative;
   z-index: 1;
+  width: 76px;
+  height: 76px;
 }
 
-.writer-host :deep(svg) {
+.writer-svg {
   display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+/* 描边动画：stroke-dashoffset 逐段"写"出，末段填充成实色绣线 */
+.stroke-text {
+  font-family: var(--hand-font, 'LXGW WenKai', 'Kaiti SC', 'STKaiti', 'KaiTi', serif);
+  font-size: 54px;
+  stroke: currentColor;
+  fill: currentColor;
+  fill-opacity: 0;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-dasharray: 800;
+  stroke-dashoffset: 800;
+}
+
+.writer-host.stitch .stroke-text {
+  animation:
+    write-on var(--dur, 1700ms) linear forwards,
+    fill-in calc(var(--dur, 1700ms) * 0.4) ease-out calc(var(--dur, 1700ms) * 0.6) forwards;
+}
+
+@keyframes write-on {
+  from { stroke-dashoffset: 800; fill-opacity: 0; }
+  to { stroke-dashoffset: 0; fill-opacity: 0; }
+}
+
+@keyframes fill-in {
+  from { fill-opacity: 0; }
+  to { fill-opacity: 1; }
 }
 
 .empty-hint {
@@ -942,6 +950,19 @@ function petals(f) {
   font-family: var(--hand-font, 'LXGW WenKai', 'Kaiti SC', 'STKaiti', 'KaiTi', serif);
   font-size: 40px;
   white-space: pre;
+  /* 非中文：打字机式擦除 + 淡入（clip-path 不影响歪斜 transform） */
+  animation: type-in 300ms ease-out both;
+}
+
+@keyframes type-in {
+  from {
+    opacity: 0;
+    clip-path: inset(-30% 100% -30% 0);
+  }
+  to {
+    opacity: 1;
+    clip-path: inset(-30% 0 -30% 0);
+  }
 }
 
 .nl {
